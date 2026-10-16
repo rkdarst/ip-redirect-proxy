@@ -107,11 +107,15 @@ def parse_only_dst(text):
 
 
 def parse_host_port(text, default_host, default_port):
-    # host[:port]; host may be a hostname or IPv4 address.
+    # bare port, host[:port]; host may be a hostname or IPv4 address.
+    if not text:
+        return default_host, default_port
+    if text.isdigit():
+        return default_host, int(text)
     host, sep, port_text = text.rpartition(":")
-    if host == "":
-        host = default_host
-    return host, int(port_text) if port_text else default_port
+    if not sep:
+        return text, default_port
+    return (host or default_host), int(port_text) if port_text else default_port
 
 
 def destination_allowed(only_dst, dst_ip, dst_port):
