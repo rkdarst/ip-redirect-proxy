@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import ipaddress
+import os
+import signal
 import socket
 import struct
 import threading
 
 SO_ORIGINAL_DST = 80  # Linux IPv4
+
+# (dst_ip, dst_port) -> [bytes client->upstream, bytes upstream->client, connections]
+stats_lock = threading.Lock()
+stats = {}
 
 
 def recv_exact(sock, size):
@@ -65,7 +71,7 @@ def connect_socks5(proxy_host, proxy_port, target_ip, target_port):
         raise
 
 
-def copy_stream(src, dst):
+def copy_stream(src, dst, total):
     try:
         while True:
             data = src.recv(65536)
@@ -75,6 +81,7 @@ def copy_stream(src, dst):
                 except OSError:
                     pass
                 return
+            total[0] += len(data)
             dst.sendall(data)
     except OSError:
         for sock in (src, dst):
@@ -132,9 +139,11 @@ def handle_client(client, args):
         )
         print(f"{peer} -> SOCKS5 -> {dst_ip}:{dst_port}")
 
+        sent = [0]
+        received = [0]
         threads = [
-            threading.Thread(target=copy_stream, args=(client, upstream), daemon=True),
-            threading.Thread(target=copy_stream, args=(upstream, client), daemon=True),
+            threading.Thread(target=copy_stream, args=(client, upstream, sent), daemon=True),
+            threading.Thread(target=copy_stream, args=(upstream, client, received), daemon=True),
         ]
         for thread in threads:
             thread.start()
@@ -146,6 +155,22 @@ def handle_client(client, args):
         client.close()
         if upstream is not None:
             upstream.close()
+            with stats_lock:
+                entry = stats.setdefault((dst_ip, dst_port), [0, 0, 0])
+                entry[0] += sent[0]
+                entry[1] += received[0]
+                entry[2] += 1
+
+
+def format_stats():
+    lines = ["Traffic through proxy (bytes, no TCP/IP headers):"]
+    with stats_lock:
+        entries = sorted(stats.items())
+    if not entries:
+        lines.append("  (no connections yet)")
+    for (ip, port), (sent, received, conns) in entries:
+        lines.append(f"  {ip}:{port}  conns={conns}  sent={sent}  recv={received}")
+    return "\n".join(lines) + "\n"
 
 
 def main():
@@ -185,6 +210,11 @@ def main():
         args.only_dst = (ip, port)
         args.only_dst_label = f"{ip}" + (f":{port}" if port else "")
 
+    def dump_stats(signum, frame):
+        os.write(2, format_stats().encode())
+
+    signal.signal(signal.SIGUSR1, dump_stats)
+
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.listen_host, args.listen_port))
@@ -198,7 +228,7 @@ def main():
                 target=handle_client, args=(client, args), daemon=True
             ).start()
     except KeyboardInterrupt:
-        pass
+        print(format_stats(), end="")
     finally:
         listener.close()
 

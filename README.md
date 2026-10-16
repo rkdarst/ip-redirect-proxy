@@ -1,7 +1,6 @@
 # iptables transparent proxy redirect.
 
-
-This code is designed to capture certain connections (with iptables, at the Linux kernel level) transparently redirected them through a SOCKS proxy.  It is designed when I need to SOCKS-proxy certain connections, but the relevant SOCKS-proxy rules are not accurate enough.  It is quite similar to [sshuttle](https://github.com/sshuttle/sshuttle), and if that tool does what you want, I would recommend to use that instead.
+This code is designed to capture certain connections (with iptables, at the Linux kernel level) transparently redirected them through a SOCKS proxy.  It was designed when I needed to SOCKS-proxy certain connections, but I could not specify the SOCKS proxy precisely enough.  It is quite similar to [sshuttle](https://github.com/sshuttle/sshuttle), and if that tool does what you want, I would recommend to use that instead.  The proxy is byte-transparent and works on SSL streams.
 
 This tool (but not this README file) is machine-generated under my review.
 
@@ -9,7 +8,7 @@ Specific example use case: my LLM coding harness can't configure a SOCKS proxy f
 
 The steps go like this:
 
-* **iptables** (well, the Linux kernel) trasparently redirects connections of your choosing to `localhost:15001`.
+* **iptables** (well, the Linux kernel) transparently redirects connections of your choosing to `localhost:15001`.
 * **This program** listens on `localhost:15001`, accepts connections, figures out the original destination, and sends them via a SOCKS proxy listening on `localhost:1080`
 * **The proxy** listening on `localhost:1080` may be a `ssh -D 1080` proxy that sends it somewhere else.  (You need to run this yourself)
 
@@ -47,8 +46,7 @@ You must run this tool as a dedicated unprivileged user so the firewall can exem
 
 ```bash
 sudo useradd --system --no-create-home socksproxy
-sudo -u socksproxy python3 ip-redirect_socks.py \
-  --socks-host 127.0.0.1 --socks-port 1080
+sudo -u socksproxy python3 ip-redirect_socks.py 15001 localhost:1080
 ```
 
 Set up the example iptables rules.  This is different from above in that it exempts the socksproxy user:
