@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import struct
+import sys
 import threading
 
 SO_ORIGINAL_DST = 80  # Linux IPv4
@@ -173,6 +174,19 @@ def format_stats():
     return "\n".join(lines) + "\n"
 
 
+def stats_stdin_watcher():
+    # Interactive helper: Enter prints stats, q+Enter quits like Ctrl-C.
+    try:
+        for line in sys.stdin:
+            cmd = line.strip().lower()
+            if cmd == "q":
+                os.kill(os.getpid(), signal.SIGINT)
+            elif cmd == "":
+                os.write(2, format_stats().encode())
+    except OSError:
+        pass  # stdin closed or redirected (daemon, systemd, </dev/null)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Redirected IPv4 TCP connections forwarded through SOCKS5"
@@ -214,6 +228,10 @@ def main():
         os.write(2, format_stats().encode())
 
     signal.signal(signal.SIGUSR1, dump_stats)
+
+    if sys.stdin.isatty():
+        print("Press Enter for stats, q+Enter to quit.", flush=True)
+    threading.Thread(target=stats_stdin_watcher, daemon=True).start()
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
