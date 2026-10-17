@@ -6,8 +6,9 @@ SOCKS proxy.  It was designed when I needed to SOCKS-proxy certain
 connections, but I could not specify the SOCKS proxy precisely enough.
 It is quite similar to
 [sshuttle](https://github.com/sshuttle/sshuttle), and if that tool
-does what you want, I would recommend to use that instead.  The proxy
-is byte-transparent and works on SSL streams.
+does what you want, I would recommend to use that instead.  If you can
+have an application-specific proxy (LiteLLM proxy), consider that
+instead.  The proxy is byte-transparent and works on SSL streams, too.
 
 This tool (but not this README file) is machine-generated under my
 review.
@@ -41,9 +42,13 @@ The steps go like this:
   traffic for the local computer.  See the privileged `TPROXY` mode
   for using this as a router.
 * This is written in pure Python so not the highest performance (yet).
+* DNS lookups happen on the local computer.
+* There are generally not good error handling.  The user should beware.
 
 
 ## Usage
+
+Pure Python 3.x (no external dependencies).
 
 Run the proxy.  The first argument is the listen [host:]port (host
 defaults to 127.0.0.1, port defaults to 15001), the second the SOCKS
@@ -82,7 +87,7 @@ process-owner match.  This is untested and probably not recommended.
 
 ```bash
 sudo useradd --system --no-create-home socksproxy
-sudo -u socksproxy python3 ip-redirect_socks.py 15001 localhost:1080
+sudo -u socksproxy python3 ip-redirect-proxy.py 15001 localhost:1080
 ```
 
 Set up the example iptables rules.  This is different from above in
@@ -113,12 +118,30 @@ about networking to do the setup yourself (it is not documented here).
   `-j REDIRECT` or `-j TPROXY` (or both at the same time) all in the
   same running process.
 
-The rough idea for directing packets into the socket is:
+Some prototype commands are below but *read about TPROXY yourself!*
 
 ```bash
-TODO
+DST=1.2.3.4
+
+sudo iptables -t mangle -N SOCKS_OUT
+sudo iptables -t mangle -A SOCKS_OUT -p tcp -m multiport --dports 80,443 \
+  -d $DST -j TPROXY --on-port 15001 --tproxy-mark 1
+sudo iptables -t mangle -A PREROUTING -j SOCKS_OUT
+
+# Deliver the marked packets to the local stack so the transparent
+# socket actually receives them:
+sudo ip rule add fwmark 1 lookup 100
+sudo ip route add local 0.0.0.0/0 dev lo table 100
 ```
 
+Two options to get the required permissions include:
+```bash
+sudo python3 ip-redirect-proxy.py 15001 localhost:1080
+
+sudo setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups \
+  --inh-caps=+net_admin,+net_raw --ambient-caps=+net_admin,+net_raw \
+  -- python3 ip-redirect-proxy.py 15001 localhost:1080
+```
 
 
 ## See also
@@ -138,3 +161,12 @@ TODO
   * If your use case is within a web browsing, this would be a better
     option.
   * Like with ip-redirect-proxy, you need to set up your own `ssh -D`.
+* An application-specific proxy like LiteLLM proxy.
+* The [socat](http://www.dest-unreach.org/socat/) utility can do a ton
+  of different network operations (not the core function here but it can
+  probably send single connections through a SOCKS proxy easily)
+
+
+## License
+
+CC0

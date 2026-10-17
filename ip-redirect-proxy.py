@@ -40,7 +40,7 @@ def recv_exact(sock, size):
     return bytes(data)
 
 
-def original_destination(client, tproxy_enabled):
+def original_destination(client, tproxy_enabled, fallback_dst=None):
     # Which capture method (if any) produced this connection is determined
     # per connection, at run time; the first path that yields a destination
     # wins:
@@ -63,11 +63,17 @@ def original_destination(client, tproxy_enabled):
         # TPROXY path: the transparent listener received the connection with
         # its real destination still on it, so getsockname() is the answer.
         return local
+    if fallback_dst is not None:
+        # Plain connection straight to the proxy port with no capture rule
+        # in place, but the caller forced a destination (--only-dst):
+        # treat it as a connection to that destination.
+        return fallback_dst
     # Plain connection straight to the proxy port with no capture rule in
     # place; forwarding it would send it back to this same proxy via SOCKS.
     raise ConnectionError(
         "connection has no original destination "
-        "(not captured by REDIRECT/DNAT, and TPROXY listener not enabled)"
+        "(not captured by REDIRECT/DNAT, TPROXY listener not enabled, "
+        "and no --only-dst destination forced)"
     )
 
 
@@ -168,7 +174,9 @@ def handle_client(client, args):
     upstream = None
 
     try:
-        dst_ip, dst_port = original_destination(client, args.tproxy_enabled)
+        dst_ip, dst_port = original_destination(
+            client, args.tproxy_enabled, args.only_dst
+        )
         if args.only_dst is not None and not destination_allowed(
             args.only_dst, dst_ip, dst_port
         ):
