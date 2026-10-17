@@ -8,7 +8,22 @@ import struct
 import sys
 import threading
 
-SO_ORIGINAL_DST = 80  # Linux IPv4
+# Connection capture is Linux-netfilter-specific.  Two methods are supported
+# and each incoming connection is detected at run time (see
+# original_destination()):
+#
+# REDIRECT/DNAT (nat table): the kernel rewrites the connection's destination
+#   to this proxy and records the original in conntrack.  REDIRECT-specific
+#   readout (also what the README's nat/OUTPUT rules use):
+SO_ORIGINAL_DST = 80  # getsockopt(SOL_IP, SO_ORIGINAL_DST) -> pre-NAT sockaddr_in
+#
+# TPROXY (mangle table, PREROUTING only): no NAT happens at all; the kernel
+#   delivers the connection to the proxy with its real destination address
+#   still attached, so getsockname() IS the original destination.
+#   TPROXY-specific: the listener must have IP_TRANSPARENT set or the kernel
+#   refuses to hand it connections addressed to other hosts.  Setting that
+#   option requires CAP_NET_ADMIN or CAP_NET_RAW (see main()).
+IP_TRANSPARENT = getattr(socket, "IP_TRANSPARENT", 19)  # Linux
 
 # (dst_ip, dst_port) -> [bytes client->upstream, bytes upstream->client, connections]
 stats_lock = threading.Lock()
@@ -25,12 +40,35 @@ def recv_exact(sock, size):
     return bytes(data)
 
 
-def original_destination(client):
-    # sockaddr_in: family (2 bytes), port (2), IPv4 address (4), padding
-    raw = client.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-    ip = socket.inet_ntoa(raw[4:8])
-    port = struct.unpack("!H", raw[2:4])[0]
-    return ip, port
+def original_destination(client, tproxy_enabled):
+    # Which capture method (if any) produced this connection is determined
+    # per connection, at run time; the first path that yields a destination
+    # wins:
+    local = client.getsockname()[:2]
+    try:
+        # REDIRECT/DNAT path: conntrack kept the pre-NAT destination.
+        # sockaddr_in: family (2 bytes), port (2), IPv4 address (4), padding
+        raw = client.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
+        ip = socket.inet_ntoa(raw[4:8])
+        port = struct.unpack("!H", raw[2:4])[0]
+        if (ip, port) != local:
+            return ip, port
+        # Equal to our own address: no NAT was recorded (under TPROXY,
+        # conntrack never rewrote anything, so SO_ORIGINAL_DST can echo the
+        # transparent socket's own address) -- fall through rather than
+        # forward the connection back to ourselves.
+    except OSError:
+        pass  # no conntrack NAT entry: not REDIRECT/DNAT (e.g. TPROXY)
+    if tproxy_enabled:
+        # TPROXY path: the transparent listener received the connection with
+        # its real destination still on it, so getsockname() is the answer.
+        return local
+    # Plain connection straight to the proxy port with no capture rule in
+    # place; forwarding it would send it back to this same proxy via SOCKS.
+    raise ConnectionError(
+        "connection has no original destination "
+        "(not captured by REDIRECT/DNAT, and TPROXY listener not enabled)"
+    )
 
 
 def connect_socks5(proxy_host, proxy_port, target_ip, target_port):
@@ -130,7 +168,7 @@ def handle_client(client, args):
     upstream = None
 
     try:
-        dst_ip, dst_port = original_destination(client)
+        dst_ip, dst_port = original_destination(client, args.tproxy_enabled)
         if args.only_dst is not None and not destination_allowed(
             args.only_dst, dst_ip, dst_port
         ):
@@ -239,9 +277,23 @@ def main():
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # TPROXY-specific (REDIRECT does not need this): mark the listener
+    # IP_TRANSPARENT so the kernel hands it connections whose destination is
+    # not this machine.  Requires CAP_NET_ADMIN or CAP_NET_RAW, so this is
+    # best-effort: an unprivileged REDIRECT-only run is unaffected, and only
+    # if it succeeds is the getsockname() fallback in original_destination()
+    # trusted (args.tproxy_enabled below).
+    args.tproxy_enabled = False
+    try:
+        listener.setsockopt(socket.SOL_IP, IP_TRANSPARENT, 1)
+        args.tproxy_enabled = True
+    except PermissionError:
+        pass  # lacking the capability: REDIRECT-only mode
     listener.bind((args.listen_host, args.listen_port))
     listener.listen(256)
     print(f"Listening on {args.listen_host}:{args.listen_port}")
+    if args.tproxy_enabled:
+        print("TPROXY capture enabled (listener is IP_TRANSPARENT)")
 
     try:
         while True:
