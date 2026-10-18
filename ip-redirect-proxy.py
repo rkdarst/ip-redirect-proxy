@@ -82,14 +82,38 @@ def original_destination(client, tproxy_enabled, fallback_dst=None):
     )
 
 
-def connect_socks5(proxy_host, proxy_port, target_ip, target_port):
+def socks_auth_from_env():
+    # Optional SOCKS5 username/password authentication (RFC 1929),
+    # configured through IP_REDIRECT_PROXY_SOCKS_AUTH="user:pass"
+    # (split at the first colon; unset means no-auth, method 0x00).
+    env = os.environ.get("IP_REDIRECT_PROXY_SOCKS_AUTH")
+    if env is None:
+        return None
+    user, sep, password = env.partition(":")
+    if (not sep or not user or not password
+            or len(user.encode()) > 255 or len(password.encode()) > 255):
+        raise SystemExit('IP_REDIRECT_PROXY_SOCKS_AUTH must be "user:pass"'
+                         " with 1-255 bytes per part")
+    return user.encode(), password.encode()
+
+
+def connect_socks5(proxy_host, proxy_port, target_ip, target_port, auth=None):
     proxy = socket.create_connection((proxy_host, proxy_port), timeout=10)
 
     try:
-        # SOCKS5, no-authentication method
-        proxy.sendall(b"\x05\x01\x00")
-        if recv_exact(proxy, 2) != b"\x05\x00":
-            raise ConnectionError("SOCKS proxy did not accept no-auth")
+        # SOCKS5 method negotiation: advertise no-auth (0x00), or
+        # username/password (0x02, RFC 1929) when credentials are set.
+        method = b"\x02" if auth else b"\x00"
+        proxy.sendall(b"\x05\x01" + method)
+        if recv_exact(proxy, 2) != b"\x05" + method:
+            raise ConnectionError("SOCKS proxy did not accept our method")
+        if auth:
+            user, password = auth
+            proxy.sendall(b"\x01" + bytes([len(user)]) + user
+                          + bytes([len(password)]) + password)
+            if recv_exact(proxy, 2) != b"\x01\x00":
+                raise ConnectionError(
+                    "SOCKS5 username/password authentication failed")
 
         addr = ipaddress.ip_address(target_ip)
         atyp = 1 if addr.version == 4 else 4
@@ -191,7 +215,8 @@ def handle_client(client, args):
             )
             return
         upstream = connect_socks5(
-            args.socks_host, args.socks_port, dst_ip, dst_port
+            args.socks_host, args.socks_port, dst_ip, dst_port,
+            args.socks_auth
         )
         print(f"{peer} -> SOCKS5 -> {dst_ip}:{dst_port}")
 
@@ -269,6 +294,7 @@ def main():
     args.socks_host, args.socks_port = parse_host_port(
         args.socks_host_port, "localhost", 1080
     )
+    args.socks_auth = socks_auth_from_env()
 
     args.only_dst_label = None
     if args.only_dst is not None:
@@ -307,6 +333,8 @@ def main():
     print(f"Listening on {args.listen_host}:{args.listen_port}")
     if args.tproxy_enabled:
         print("TPROXY capture enabled (listener is IP_TRANSPARENT)")
+    if args.socks_auth:
+        print("SOCKS5 username/password authentication enabled")
 
     try:
         while True:

@@ -266,28 +266,86 @@ fail:
     return -1;
 }
 
+/* Optional SOCKS5 username/password authentication (RFC 1929),
+ * configured through the IP_REDIRECT_PROXY_SOCKS_AUTH environment
+ * variable ("user:pass", split at the first colon; unset means no-auth,
+ * method 0x00).  The pointers refer into the environment string, which
+ * persists for the process lifetime.  Returns 1 when credentials are
+ * configured, 0 when unset, -1 on a malformed value. */
+struct socks_auth {
+    const char *user;
+    unsigned char user_len;
+    const char *pass;
+    unsigned char pass_len;
+};
+
+static int parse_socks_auth_env(struct socks_auth *auth)
+{
+    const char *env = getenv("IP_REDIRECT_PROXY_SOCKS_AUTH");
+    const char *colon;
+
+    if (env == NULL)
+        return 0;
+    colon = strchr(env, ':');
+    if (colon == NULL || colon == env || colon[1] == '\0' ||
+        (size_t)(colon - env) > 255 || strlen(colon + 1) > 255) {
+        fprintf(stderr, "IP_REDIRECT_PROXY_SOCKS_AUTH must be "
+                        "\"user:pass\" with 1-255 bytes per part\n");
+        return -1;
+    }
+    auth->user = env;
+    auth->user_len = (unsigned char)(colon - env);
+    auth->pass = colon + 1;
+    auth->pass_len = (unsigned char)strlen(colon + 1);
+    return 1;
+}
+
 /*
- * SOCKS5, no-authentication method; returns the connected socket or -1.
- * The request carries the target as an IPv4 address literal (ATYP 1).
- * Protocol failures print their own detail line; errno is set to EPROTO.
+ * SOCKS5; method negotiation offers no-auth (0x00), or username/password
+ * (0x02, RFC 1929) when auth is given.  The request carries the target
+ * as an IPv4 address literal (ATYP 1).  Protocol failures print their
+ * own detail line; errno is set to EPROTO.
  */
 static int connect_socks5(const struct sockaddr_in *socks,
-                          const struct sockaddr_in *dst)
+                          const struct sockaddr_in *dst,
+                          const struct socks_auth *auth)
 {
     unsigned char reply[22];
     int fd = connect_timeout(socks, SOCKS_CONNECT_TIMEOUT_MS);
 
     if (fd < 0)
         return -1;
-    if (sendall(fd, (unsigned char[]){0x05, 0x01, 0x00}, 3) < 0 ||
+    if (sendall(fd, (unsigned char[]){0x05, 0x01, auth ? 0x02 : 0x00},
+                3) < 0 ||
         recv_exact(fd, reply, 2) < 0)
         goto fail;
-    if (reply[0] != 5 || reply[1] != 0) {
+    if (reply[0] != 5 || reply[1] != (auth ? 2 : 0)) {
         fprintf(stderr,
-                "SOCKS proxy did not accept no-auth (reply %02x %02x)\n",
+                "SOCKS proxy did not accept our method (reply %02x %02x)\n",
                 reply[0], reply[1]);
         errno = EPROTO;
         goto fail;
+    }
+    if (auth) {
+        unsigned char req[1 + 1 + 255 + 1 + 255];
+        size_t off = 0;
+
+        /* RFC 1929 sub-negotiation: ver, ulen, uname, plen, passwd */
+        req[off++] = 0x01;
+        req[off++] = auth->user_len;
+        memcpy(req + off, auth->user, auth->user_len);
+        off += auth->user_len;
+        req[off++] = auth->pass_len;
+        memcpy(req + off, auth->pass, auth->pass_len);
+        off += auth->pass_len;
+        if (sendall(fd, req, off) < 0 || recv_exact(fd, reply, 2) < 0)
+            goto fail;
+        if (reply[0] != 1 || reply[1] != 0) {
+            fprintf(stderr, "SOCKS5 username/password authentication "
+                            "failed (status %d)\n", reply[1]);
+            errno = EPROTO;
+            goto fail;
+        }
     }
 
     {
@@ -359,7 +417,7 @@ static void relay(int from, int to)
 }
 
 static void handle_client(int cfd, const struct sockaddr_in *socks,
-                          int tproxy_enabled)
+                          int tproxy_enabled, const struct socks_auth *auth)
 {
     struct sockaddr_in peer, dst;
     socklen_t plen = sizeof peer;
@@ -378,7 +436,7 @@ static void handle_client(int cfd, const struct sockaddr_in *socks,
         close(cfd);
         return;
     }
-    upfd = connect_socks5(socks, &dst);
+    upfd = connect_socks5(socks, &dst, auth);
     if (upfd < 0) {
         fmt_sockaddr(&peer, peerbuf, sizeof peerbuf);
         fmt_sockaddr(&dst, dstbuf, sizeof dstbuf);
@@ -415,7 +473,8 @@ int main(int argc, char **argv)
     const char *listen_host, *socks_host;
     int listen_port, socks_port;
     struct sockaddr_in listen_addr, socks_addr;
-    int lfd, on = 1, tproxy = 0;
+    struct socks_auth auth;
+    int lfd, on = 1, tproxy = 0, have_auth;
 
     if (argc != 3) {
         fprintf(stderr, "usage: %s listen-[host:]port socks-[host:]port\n",
@@ -433,6 +492,9 @@ int main(int argc, char **argv)
         return 1;
     if (resolve_host(listen_host, listen_port, &listen_addr) < 0)
         return 1;
+    have_auth = parse_socks_auth_env(&auth);
+    if (have_auth < 0)
+        return 2;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGCHLD, SIG_IGN); /* no zombies */
@@ -489,6 +551,8 @@ int main(int argc, char **argv)
     printf("Listening on %s:%d\n", listen_host, listen_port);
     if (tproxy)
         printf("TPROXY capture enabled (listener is IP_TRANSPARENT)\n");
+    if (have_auth)
+        printf("SOCKS5 username/password authentication enabled\n");
 
     for (;;) {
         int cfd = accept(lfd, NULL, NULL);
@@ -508,7 +572,7 @@ int main(int argc, char **argv)
         }
         if (pid == 0) {
             close(lfd);
-            handle_client(cfd, &socks_addr, tproxy);
+            handle_client(cfd, &socks_addr, tproxy, have_auth ? &auth : NULL);
             _exit(0);
         }
         close(cfd);
