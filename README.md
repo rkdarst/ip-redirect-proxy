@@ -48,7 +48,8 @@ The steps go like this:
 
 ## Usage
 
-Pure Python 3.x (no external dependencies).
+The main version is pure Python 3.x (no external dependencies).  There
+is also a mostly compatible C version you can compile.
 
 Run the proxy.  The first argument is the listen [host:]port (host
 defaults to 127.0.0.1, port defaults to 15001), the second the SOCKS
@@ -138,8 +139,10 @@ Two options to get the required permissions include:
 ```bash
 sudo python3 ip-redirect-proxy.py 15001 localhost:1080
 
+# Either CAP_NET_ADMIN or CAP_NET_RAW is sufficient for IP_TRANSPARENT
+# (one is enough; the kernel accepts either):
 sudo setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups \
-  --inh-caps=+net_admin,+net_raw --ambient-caps=+net_admin,+net_raw \
+  --inh-caps=+net_raw --ambient-caps=+net_raw \
   -- python3 ip-redirect-proxy.py 15001 localhost:1080
 ```
 

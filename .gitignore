@@ -1,0 +1,4 @@
+# build output
+ip-redirect-proxy-c
+*.o
+__pycache__/

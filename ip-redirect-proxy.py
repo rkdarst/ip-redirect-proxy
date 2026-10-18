@@ -8,6 +8,11 @@ import struct
 import sys
 import threading
 
+# This is the primary source for this tool.  When changing behavior,
+# update this file first, then mirror the change in the C version
+# (ip-redirect-proxy.c), which follows this file within its stated
+# parameters (no --only-dst, no stats reporting, no stdin helper).
+
 # Connection capture is Linux-netfilter-specific.  Two methods are supported
 # and each incoming connection is detected at run time (see
 # original_destination()):
