@@ -1,4 +1,4 @@
 # build output
-ip-redirect-proxy-c
+ip-redirect-proxy
 *.o
 __pycache__/
