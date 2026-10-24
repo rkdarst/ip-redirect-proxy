@@ -43,7 +43,9 @@ The steps go like this:
   for using this as a router.
 * This is written in pure Python so not the highest performance (yet).
 * DNS lookups happen on the local computer.
-* There are generally not good error handling.  The user should beware.
+* There are generally not good error handling and errors may be
+  surfaced to the user.  This is by design to maintain simplicity, and
+  the user needs to figure out the cause of any errors.
 
 
 ## Usage

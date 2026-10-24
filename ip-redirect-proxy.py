@@ -45,7 +45,8 @@ def recv_exact(sock, size):
     return bytes(data)
 
 
-def original_destination(client, tproxy_enabled, fallback_dst=None):
+def original_destination(client, tproxy_enabled, fallback_dst=None,
+                         listen_addr=None):
     # Which capture method (if any) produced this connection is determined
     # per connection, at run time; the first path that yields a destination
     # wins:
@@ -67,18 +68,26 @@ def original_destination(client, tproxy_enabled, fallback_dst=None):
     if tproxy_enabled:
         # TPROXY path: the transparent listener received the connection with
         # its real destination still on it, so getsockname() is the answer.
-        return local
+        # Exception: a connection made *directly* to our own listening
+        # address (no capture rule involved) looks identical, and returning
+        # it would forward the connection back into this same proxy via
+        # SOCKS, so fall through to the fallback/error paths instead.
+        if listen_addr is None or local != listen_addr:
+            return local
     if fallback_dst is not None:
         # Plain connection straight to the proxy port with no capture rule
         # in place, but the caller forced a destination (--only-dst):
         # treat it as a connection to that destination.
         return fallback_dst
     # Plain connection straight to the proxy port with no capture rule in
-    # place; forwarding it would send it back to this same proxy via SOCKS.
+    # place (including, with TPROXY enabled, one aimed at our own listening
+    # address); forwarding it would send it back to this same proxy via
+    # SOCKS.
     raise ConnectionError(
         "connection has no original destination "
         "(not captured by REDIRECT/DNAT, TPROXY listener not enabled, "
-        "and no --only-dst destination forced)"
+        "no --only-dst destination forced, or connected directly to the "
+        "proxy port)"
     )
 
 
@@ -204,7 +213,7 @@ def handle_client(client, args):
 
     try:
         dst_ip, dst_port = original_destination(
-            client, args.tproxy_enabled, args.only_dst
+            client, args.tproxy_enabled, args.only_dst, args.listen_addr
         )
         if args.only_dst is not None and not destination_allowed(
             args.only_dst, dst_ip, dst_port
@@ -330,6 +339,11 @@ def main():
         pass  # lacking the capability: REDIRECT-only mode
     listener.bind((args.listen_host, args.listen_port))
     listener.listen(256)
+    # Bound (ip, port) of the listener.  Under TPROXY this distinguishes
+    # connections captured by a TPROXY rule (real remote destination) from
+    # connections made directly to the proxy port (see
+    # original_destination()).
+    args.listen_addr = listener.getsockname()[:2]
     print(f"Listening on {args.listen_host}:{args.listen_port}")
     if args.tproxy_enabled:
         print("TPROXY capture enabled (listener is IP_TRANSPARENT)")

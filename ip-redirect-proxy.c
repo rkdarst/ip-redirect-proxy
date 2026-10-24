@@ -37,6 +37,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -48,6 +49,8 @@
 #define IP_TRANSPARENT 19
 #endif
 
+/* Connect timeout, and (matching the Python version's socket timeout)
+ * also the timeout for each SOCKS handshake send()/recv(). */
 #define SOCKS_CONNECT_TIMEOUT_MS 10000
 
 static const char *def_listen_host = "127.0.0.1";
@@ -191,14 +194,19 @@ static void fmt_sockaddr(const struct sockaddr_in *a, char *buf, size_t len)
  *    forward the connection back to ourselves.
  * 2. TPROXY path (only if the listener is IP_TRANSPARENT): the
  *    transparent listener received the connection with its real
- *    destination still on it, so getsockname() is the answer.
+ *    destination still on it, so getsockname() is the answer --
+ *    unless it equals our own listening address, which means the
+ *    connection was made directly to the proxy port (no capture
+ *    rule); fall through rather than forward the connection back to
+ *    ourselves.
  * 3. Neither: the connection went straight to the proxy port with no
  *    capture rule in place; forwarding it would send it back to this
  *    same proxy via SOCKS.  Returns -1 with errno ENOENT (the caller
  *    prints the explanatory message).
  */
 static int get_original_destination(int fd, struct sockaddr_in *dst,
-                                    int tproxy_enabled)
+                                    int tproxy_enabled,
+                                    const struct sockaddr_in *listen_addr)
 {
     struct sockaddr_in local;
     struct sockaddr_in orig;
@@ -214,8 +222,15 @@ static int get_original_destination(int fd, struct sockaddr_in *dst,
         return 0;
     }
     if (tproxy_enabled) {
-        *dst = local;
-        return 0;
+        if (listen_addr == NULL ||
+            local.sin_addr.s_addr != listen_addr->sin_addr.s_addr ||
+            local.sin_port != listen_addr->sin_port) {
+            *dst = local;
+            return 0;
+        }
+        /* Our own listening address: a plain connection straight to the
+         * proxy port; forwarding it would send it back to this same
+         * proxy via SOCKS. */
     }
     errno = ENOENT;
     return -1;
@@ -315,6 +330,21 @@ static int connect_socks5(const struct sockaddr_in *socks,
 
     if (fd < 0)
         return -1;
+    /* Match the Python version: the timeout covers not just the TCP
+     * connect but also each handshake send()/recv(), so a SOCKS proxy
+     * that accepts the connection but then stalls cannot hang this
+     * connection forever.  The timeouts are removed again once the
+     * handshake completes, so relaying itself is untimed. */
+    {
+        struct timeval tv = {
+            .tv_sec = SOCKS_CONNECT_TIMEOUT_MS / 1000,
+            .tv_usec = (SOCKS_CONNECT_TIMEOUT_MS % 1000) * 1000,
+        };
+
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0 ||
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) < 0)
+            goto fail;
+    }
     if (sendall(fd, (unsigned char[]){0x05, 0x01, auth ? 0x02 : 0x00},
                 3) < 0 ||
         recv_exact(fd, reply, 2) < 0)
@@ -378,6 +408,14 @@ static int connect_socks5(const struct sockaddr_in *socks,
         errno = EPROTO;
         goto fail;
     }
+    /* Handshake complete: remove the handshake timeouts again so that
+     * relaying itself is untimed. */
+    {
+        struct timeval tv0 = {0, 0};
+
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv0, sizeof tv0);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv0, sizeof tv0);
+    }
     return fd;
 fail:
     {
@@ -417,6 +455,7 @@ static void relay(int from, int to)
 }
 
 static void handle_client(int cfd, const struct sockaddr_in *socks,
+                          const struct sockaddr_in *listen_addr,
                           int tproxy_enabled, const struct socks_auth *auth)
 {
     struct sockaddr_in peer, dst;
@@ -427,12 +466,14 @@ static void handle_client(int cfd, const struct sockaddr_in *socks,
 
     if (getpeername(cfd, (struct sockaddr *)&peer, &plen) < 0)
         memset(&peer, 0, sizeof peer);
-    if (get_original_destination(cfd, &dst, tproxy_enabled) < 0) {
+    if (get_original_destination(cfd, &dst, tproxy_enabled,
+                                 listen_addr) < 0) {
         fmt_sockaddr(&peer, peerbuf, sizeof peerbuf);
         fprintf(stderr,
                 "connection from %s failed: connection has no original "
-                "destination (not captured by REDIRECT/DNAT, and TPROXY "
-                "listener not enabled)\n", peerbuf);
+                "destination (not captured by REDIRECT/DNAT, TPROXY "
+                "listener not enabled, or connected directly to the "
+                "proxy port)\n", peerbuf);
         close(cfd);
         return;
     }
@@ -572,7 +613,8 @@ int main(int argc, char **argv)
         }
         if (pid == 0) {
             close(lfd);
-            handle_client(cfd, &socks_addr, tproxy, have_auth ? &auth : NULL);
+            handle_client(cfd, &socks_addr, &listen_addr, tproxy,
+                          have_auth ? &auth : NULL);
             _exit(0);
         }
         close(cfd);

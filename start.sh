@@ -1,6 +1,7 @@
 #!/bin/bash -l
 
-# Destinations for you to locally overwrite
+# Destinations for you to locally overwrite.
+# Do not commit your local changes to this file.
 declare -a DESTINATIONS=(
     example.org.invalid
 )
@@ -11,7 +12,7 @@ set -x
 sudo iptables -t nat -N SOCKS_OUT
 # flush it (resert to empty for re-filling)
 sudo iptables -t nat -F SOCKS_OUT
-# add relevant redirects
+# add the redirects
 for DESTINATION in "${DESTINATIONS[@]}"; do
     sudo iptables -t nat -A SOCKS_OUT -p tcp -m multiport --dports "$PORTS" -d "$DESTINATION" -j REDIRECT --to-ports 15001
 done
