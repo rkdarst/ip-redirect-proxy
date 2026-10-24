@@ -6,9 +6,9 @@ CFLAGS ?= -O2 -Wall -Wextra
 #   make setcap CAPS=cap_net_admin+ep
 CAPS ?= cap_net_raw+ep
 
-all: ip-redirect-proxy-c
+all: ip-redirect-proxy
 
-ip-redirect-proxy-c: ip-redirect-proxy.c
+ip-redirect-proxy: ip-redirect-proxy.c
 	$(CC) $(CFLAGS) -o $@ ip-redirect-proxy.c
 
 # Grant the TPROXY-required capabilities to the built binary only.
